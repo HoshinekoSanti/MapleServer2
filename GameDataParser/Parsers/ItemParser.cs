@@ -38,11 +38,12 @@ public class ItemParser : Exporter<List<ItemMetadata>>
             MusicScore musicScore = data.MusicScore;
             Life life = data.life;
             Housing housing = data.housing;
+            AdditionalEffect additionalEffect = data.AdditionalEffect;
             ItemMetadata metadata = new()
             {
                 Id = id,
                 Name = name,
-                Tab = GetTab(property.type, property.subtype, property.skin != 0),
+                Tab = GetTab(property.type, property.subtype, property.skin),
                 Gem = new()
                 {
                     Gem = (GemSlot) data.gem.system
@@ -73,12 +74,12 @@ public class ItemParser : Exporter<List<ItemMetadata>>
                     LevelLimitMax = limit.levelLimitMax,
                     Gender = (Gender) limit.genderLimit,
                     TransferType = (TransferType) limit.transferType,
-                    Sellable = limit.shopSell == 1,
-                    Breakable = limit.enableBreak == 1,
-                    MeretMarketListable = limit.enableRegisterMeratMarket == 1,
-                    DisableEnchant = limit.exceptEnchant == 1,
+                    Sellable = limit.shopSell,
+                    Breakable = limit.enableBreak,
+                    MeretMarketListable = limit.enableRegisterMeratMarket,
+                    DisableEnchant = limit.exceptEnchant,
                     TradeLimitByRarity = limit.tradeLimitRank,
-                    VipOnly = limit.vip == 1
+                    VipOnly = limit.vip
                 },
                 Skill = new()
                 {
@@ -148,6 +149,11 @@ public class ItemParser : Exporter<List<ItemMetadata>>
                 Shop = new()
                 {
                     ShopId = data.Shop?.systemShopID ?? 0
+                },
+                AdditionalEffect = new()
+                {
+                    Id = additionalEffect.id,
+                    Level = additionalEffect.level
                 }
             };
 

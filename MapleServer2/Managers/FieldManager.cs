@@ -28,7 +28,8 @@ public class FieldManager
 
     public readonly int MapId;
     public readonly long InstanceId;
-    public readonly short Capacity;
+    public readonly int Capacity;
+    public readonly bool IsTutorialMap;
     public readonly FieldState State = new();
     public readonly CoordS[] BoundingBox;
     public readonly TriggerScript[] Triggers;
@@ -53,12 +54,13 @@ public class FieldManager
         MapMetadata metadata = MapMetadataStorage.GetMetadata(MapId);
 
         Capacity = metadata.Property.Capacity;
+        IsTutorialMap = metadata.Property.IsTutorialMap;
         Navigator = new(metadata.XBlockName);
 
         BoundingBox = MapEntityMetadataStorage.GetBoundingBox(MapId);
 
         // Capacity 0 means solo instances
-        if (Capacity == 0)
+        if (Capacity == 0 || IsTutorialMap)
         {
             // Set instance id to player id so it's unique
             InstanceId = player.CharacterId;
@@ -194,6 +196,40 @@ public class FieldManager
         AddNpc(npc);
     }
 
+    public Pet RequestPet(Item item, Character character)
+    {
+        int objectId = Interlocked.Increment(ref Counter);
+        Pet pet = new(objectId, item, character, fieldManager: this);
+
+        Shape shape = Navigator.AddShape(pet.Value.NpcMetadataCapsule);
+        Position spawnPointPosition = Navigator.FindPositionFromCoordS(character.Coord);
+        if (!Navigator.PositionIsValid(spawnPointPosition))
+        {
+            if (!Navigator.FindFirstPositionBelow(character.Coord, out spawnPointPosition))
+            {
+                Logger.Warning("Could not find a random position around character obj id {0}, in map ID {1} for pet ID {2}",
+                    character.ObjectId, MapId, pet.Value.Id);
+                return null;
+            }
+        }
+
+        CoordS? randomPositionAround = Navigator.FindClosestUnobstructedCoordS(shape, spawnPointPosition, pet.Value.NpcMetadataDistance.Avoid);
+        if (randomPositionAround is null || randomPositionAround.Value == CoordS.From(0, 0, 0))
+        {
+            Logger.Warning("Could not find a random position around character obj id {0}, in map ID {1} for pet ID {2}",
+                character.ObjectId, MapId, pet.Value.Id);
+            return null;
+        }
+
+        pet.Coord = randomPositionAround.Value.ToFloat();
+        pet.Rotation = default;
+        pet.Animation = default;
+        pet.Agent = Navigator.AddAgent(pet, shape);
+
+        AddPet(pet);
+        return pet;
+    }
+
     private void AddEntitiesToState()
     {
         // Load default npcs for map from config
@@ -291,7 +327,7 @@ public class FieldManager
         // Load breakables
         foreach (MapBreakableActorObject mapActor in MapEntityMetadataStorage.GetBreakableActors(MapId))
         {
-            State.AddBreakable(new(mapActor.EntityId, mapActor.IsEnabled, mapActor.HideDuration, mapActor.ResetDuration));
+            State.AddBreakable(new BreakableActorObject(mapActor.EntityId, mapActor.IsEnabled, mapActor.HideDuration, mapActor.ResetDuration));
         }
 
         foreach (MapBreakableNifObject mapNif in MapEntityMetadataStorage.GetBreakableNifs(MapId))
@@ -302,12 +338,18 @@ public class FieldManager
         // Load interact objects
         foreach (MapInteractObject mapInteract in MapEntityMetadataStorage.GetInteractObjects(MapId))
         {
-            State.AddInteractObject(new(mapInteract.EntityId, mapInteract.InteractId, mapInteract.Type, InteractObjectState.Default));
+            FieldObject<InteractObject> fieldInteractObject = WrapObject(new InteractObject(mapInteract.EntityId, mapInteract.InteractId, mapInteract.Type, InteractObjectState.Default));
+            fieldInteractObject.Coord = mapInteract.Position;
+            fieldInteractObject.Rotation = mapInteract.Rotation;
+            State.AddInteractObject(fieldInteractObject);
         }
 
         foreach (MapLiftableObject liftable in MapEntityMetadataStorage.GetLiftablesObjects(MapId))
         {
-            State.AddLiftableObject(new(liftable.EntityId, liftable));
+            FieldObject<LiftableObject> fieldLiftableObject = WrapObject(new LiftableObject(liftable.EntityId, liftable));
+            fieldLiftableObject.Coord = liftable.Position;
+            fieldLiftableObject.Rotation = liftable.Rotation;
+            State.AddLiftableObject(fieldLiftableObject);
         }
 
         foreach (MapChestMetadata mapChest in MapEntityMetadataStorage.GetMapChests(MapId))
@@ -316,18 +358,18 @@ public class FieldManager
             // TODO: Golden chests ids should always increase by 1 when a new chest is added
             // For more details about chests, see https://github.com/AlanMorel/MapleServer2/issues/513
             int chestId = mapChest.IsGolden ? 14000147 : 11000004;
-            State.AddInteractObject(
+            IFieldObject<InteractObject> fieldChest = WrapObject(
                 new MapChest($"EventCreate_{GuidGenerator.Int()}", chestId, InteractObjectType.Common, InteractObjectState.Default)
                 {
-                    Position = mapChest.Position,
-                    Rotation = mapChest.Rotation,
                     Model = "MS2InteractActor",
                     Asset = mapChest.IsGolden ? "interaction_chestA_02" : "interaction_chestA_01", // 01 = wooden, 02 = golden
                     NormalState = "Opened_A",
                     Reactable = "Idle_A",
                     Scale = 1f
-                }
-            );
+                });
+            fieldChest.Coord = mapChest.Position;
+            fieldChest.Rotation = mapChest.Rotation;
+            State.AddInteractObject(fieldChest);
         }
 
         foreach (CoordS coord in MapEntityMetadataStorage.GetHealingSpot(MapId))
@@ -355,7 +397,7 @@ public class FieldManager
         Debug.Assert(player.FieldPlayer.ObjectId > 0, "Player was added to field without initialized objectId.");
 
         player.MapId = MapId;
-        if (Capacity == 0)
+        if (Capacity == 0 || IsTutorialMap)
         {
             MapPlayerSpawn spawn = MapEntityMetadataStorage.GetRandomPlayerSpawn(MapId);
             player.FieldPlayer.Coord = spawn.Coord.ToFloat();
@@ -461,9 +503,9 @@ public class FieldManager
         breakables.AddRange(State.BreakableNifs.Values);
         sender.Send(BreakablePacket.LoadBreakables(breakables));
 
-        sender.Send(InteractObjectPacket.LoadObjects(State.InteractObjects.Values.Where(t => t is not AdBalloon and not MapChest).ToList()));
+        sender.Send(InteractObjectPacket.LoadObjects(State.InteractObjects.Values.Where(t => t.Value is not AdBalloon and not MapChest).ToList()));
 
-        foreach (InteractObject mapObject in State.InteractObjects.Values.Where(t => t is MapChest or AdBalloon))
+        foreach (IFieldObject<InteractObject> mapObject in State.InteractObjects.Values.Where(t => t.Value is MapChest or AdBalloon))
         {
             sender.Send(InteractObjectPacket.Add(mapObject));
         }
@@ -496,6 +538,10 @@ public class FieldManager
         }
 
         player.Triggers.Clear();
+        if (player.Guide is not null)
+        {
+            RemoveGuide(player.Guide);
+        }
 
         if (Decrement() <= 0)
         {
@@ -540,7 +586,7 @@ public class FieldManager
     // Spawned NPCs will not appear until controlled
     private void AddNpc(Npc fieldNpc)
     {
-        if (fieldNpc.Value.Type is NpcType.Friendly)
+        if (fieldNpc.Value.Type is NpcType.Friendly or NpcType.Ally)
         {
             State.AddNpc(fieldNpc);
         }
@@ -576,6 +622,28 @@ public class FieldManager
             session.Send(FieldObjectPacket.RemoveNpc(fieldNpc));
         });
         return true;
+    }
+
+    private void AddPet(Pet pet)
+    {
+        State.AddPet(pet);
+
+        Broadcast(session =>
+        {
+            session.Send(FieldPetPacket.AddPet(pet));
+            session.Send(ResponsePetPacket.Add(pet));
+        });
+    }
+
+    public void RemovePet(Pet pet)
+    {
+        State.RemovePet(pet.ObjectId);
+
+        Broadcast(session =>
+        {
+            session.Send(ResponsePetPacket.Remove(pet));
+            session.Send(FieldPetPacket.RemovePet(pet));
+        });
     }
 
     public bool RemoveMob(Npc mob)
@@ -745,6 +813,16 @@ public class FieldManager
     public void AddSkillCast(SkillCast skillCast) => State.AddSkillCast(skillCast);
 
     public bool RemoveSkillCast(long skillSn, out SkillCast skillCast) => State.RemoveSkillCast(skillSn, out skillCast);
+
+    public IFieldObject<InteractObject> AddAdBalloon(AdBalloon adBalloon)
+    {
+        IFieldObject<InteractObject> fieldAdBalloon = WrapObject(adBalloon);
+        fieldAdBalloon.Coord = adBalloon.Owner.FieldPlayer.Coord;
+        fieldAdBalloon.Rotation = adBalloon.Owner.FieldPlayer.Rotation;
+
+        State.AddInteractObject(fieldAdBalloon);
+        return fieldAdBalloon;
+    }
 
     #endregion
 
@@ -955,7 +1033,7 @@ public class FieldManager
         TriggerTask = null;
         NpcMovementTask = null;
 
-        if (Capacity == 0)
+        if (Capacity == 0 || IsTutorialMap)
         {
             foreach (IFieldObject<Item> item in State.Items.Values)
             {
@@ -994,7 +1072,8 @@ public class FieldManager
         {
             while (PlayerCount > 0)
             {
-                UpdateEvents();
+                UpdateMobEvents();
+                UpdatePetEvents();
                 UpdateObjects();
                 HealingSpot();
                 SendUpdates();
@@ -1030,6 +1109,13 @@ public class FieldManager
                         npc.UpdateVelocity();
                         BroadcastPacket(FieldObjectPacket.ControlNpc(npc)); // TODO: Optimize this to only send packets when needed
                         npc.UpdateCoord();
+                    }
+
+                    foreach (Pet pet in State.Pets.Values)
+                    {
+                        pet.UpdateVelocity();
+                        BroadcastPacket(FieldObjectPacket.ControlNpc(pet)); // TODO: Optimize this to only send packets when needed
+                        pet.UpdateCoord();
                     }
                 }
                 catch (Exception e)
@@ -1068,7 +1154,7 @@ public class FieldManager
         return updates;
     }
 
-    private void UpdateEvents()
+    private void UpdateMobEvents()
     {
         // Manage mob aggro + targets
         foreach (IFieldActor<Player> player in State.Players.Values)
@@ -1094,11 +1180,46 @@ public class FieldManager
         }
     }
 
+    private void UpdatePetEvents()
+    {
+        // Manage pet aggro + targets
+        foreach (IFieldActor<Player> player in State.Players.Values)
+        {
+            // TODO: loop trough all mobs and check if pet should attack mob
+            foreach (Pet pet in State.Pets.Values)
+            {
+                float playerPetDistance = CoordF.Distance(player.Coord, pet.Coord);
+                // TODO: NpcMetadataDistance.Sight is incorrect, parse and use petproperty.xml
+                if (playerPetDistance > pet.Value.NpcMetadataDistance.Sight)
+                {
+                    // Teleport pet to player if they are too far away
+                    pet.Coord = player.Coord;
+                    continue;
+                }
+
+                if (playerPetDistance > Block.BLOCK_SIZE * 2)
+                {
+                    pet.State = NpcState.Combat; // Setting state as combat so pet will run towards player, probably not the best way to do this.
+                    pet.Target = player;
+                    continue;
+                }
+
+                pet.State = NpcState.Normal;
+                pet.Target = null;
+            }
+        }
+    }
+
     private void UpdateObjects()
     {
         foreach (Npc mob in State.Mobs.Values)
         {
             mob.Act();
+        }
+
+        foreach (Pet pet in State.Pets.Values)
+        {
+            pet.Act();
         }
     }
 
@@ -1120,7 +1241,7 @@ public class FieldManager
                 player.Value.Session.Send(BuffPacket.SendBuff(0, status));
                 BroadcastPacket(SkillDamagePacket.Heal(status, healAmount));
 
-                player.Stats[StatAttribute.Hp].Increase(healAmount);
+                player.Stats[StatAttribute.Hp].AddValue(healAmount);
                 player.Value.Session.Send(StatPacket.UpdateStats(player, StatAttribute.Hp));
             }
         }

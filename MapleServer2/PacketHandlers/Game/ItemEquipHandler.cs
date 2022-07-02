@@ -54,9 +54,6 @@ public class ItemEquipHandler : GamePacketHandler<ItemEquipHandler>
             return;
         }
 
-        // Remove the item from the users inventory
-        inventory.RemoveItem(session, itemUid, out item);
-
         // Get correct equipped inventory
         Dictionary<ItemSlot, Item> equippedInventory = player.GetEquippedInventory(item.InventoryTab);
         if (equippedInventory == null)
@@ -64,6 +61,14 @@ public class ItemEquipHandler : GamePacketHandler<ItemEquipHandler>
             Logger.Warning("equippedInventory was null: {inventoryTab}", item.InventoryTab);
             return;
         }
+
+        if (item.TransferType == TransferType.BindOnEquip & !item.IsBound())
+        {
+            item.BindItem(session.Player);
+        }
+
+        // Remove the item from the users inventory
+        inventory.RemoveItem(session, itemUid, out _);
 
         // Move previously equipped item back to inventory
         if (equippedInventory.Remove(equipSlot, out Item prevItem))
@@ -75,7 +80,7 @@ public class ItemEquipHandler : GamePacketHandler<ItemEquipHandler>
 
             if (prevItem.InventoryTab == InventoryTab.Gear)
             {
-                player.DecreaseStats(prevItem);
+                player.FieldPlayer.ComputeStats();
             }
         }
 
@@ -126,7 +131,7 @@ public class ItemEquipHandler : GamePacketHandler<ItemEquipHandler>
         // Add stats if gear
         if (item.InventoryTab == InventoryTab.Gear)
         {
-            player.IncreaseStats(item);
+            player.FieldPlayer.ComputeStats();
         }
     }
 
@@ -150,7 +155,7 @@ public class ItemEquipHandler : GamePacketHandler<ItemEquipHandler>
             inventory.AddItem(session, unequipItem, false);
             session.FieldManager.BroadcastPacket(EquipmentPacket.UnequipItem(player.FieldPlayer, unequipItem));
 
-            player.DecreaseStats(unequipItem);
+            player.FieldPlayer.ComputeStats();
             return;
         }
 
